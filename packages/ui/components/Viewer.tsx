@@ -6,6 +6,7 @@ import 'highlight.js/styles/github-dark.css';
 import { Block, Annotation, AnnotationType, EditorMode, type InputMethod, type ImageAttachment } from '../types';
 import { Frontmatter } from '../utils/parser';
 import { AnnotationToolbar } from './AnnotationToolbar';
+import { FloatingQuickLabelPicker } from './FloatingQuickLabelPicker';
 
 // Debug error boundary to catch silent toolbar crashes
 class ToolbarErrorBoundary extends React.Component<
@@ -166,6 +167,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     source?: any;
     codeBlock?: { block: Block; element: HTMLElement };
   } | null>(null);
+  const [quickLabelPicker, setQuickLabelPicker] = useState<{
+    anchorEl: HTMLElement;
+    cursorHint?: { x: number; y: number };
+    source?: any;
+    codeBlock?: { block: Block; element: HTMLElement };
+  } | null>(null);
+  const lastMousePosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
   const hoverTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const stickySentinelRef = useRef<HTMLDivElement>(null);
   const [isStuck, setIsStuck] = useState(false);
@@ -177,6 +185,11 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     // In pinpoint mode, apply code block annotation based on current editor mode
     if (modeRef.current === 'redline') {
       applyCodeBlockAnnotation(blockId, codeEl, AnnotationType.DELETION);
+    } else if (modeRef.current === 'quickLabel') {
+      setQuickLabelPicker({
+        anchorEl: element,
+        codeBlock: { block: blocks.find(b => b.id === blockId)!, element },
+      });
     } else {
       // Show comment popover anchored to the code block
       setCommentPopover({
@@ -192,7 +205,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     containerRef,
     highlighterRef,
     inputMethod,
-    enabled: !toolbarState && !commentPopover && !(isPlanDiffActive ?? false),
+    enabled: !toolbarState && !commentPopover && !quickLabelPicker && !(isPlanDiffActive ?? false),
     onCodeBlockClick: handlePinpointCodeBlockClick,
   });
 
@@ -251,6 +264,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     text?: string,
     images?: ImageAttachment[],
     isQuickLabel?: boolean,
+    quickLabelTip?: string,
   ) => {
     const doms = highlighter.getDoms(source.id);
     let blockId = '';
@@ -284,6 +298,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       endMeta: source.endMeta,
       images,
       ...(isQuickLabel ? { isQuickLabel: true } : {}),
+      ...(quickLabelTip ? { quickLabelTip } : {}),
     };
 
     if (type === AnnotationType.DELETION) {
@@ -530,6 +545,13 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     }
   }), [findTextInDOM, onSelectAnnotation]);
 
+  // Track last mouse position for cursor-anchored quick label picker
+  useEffect(() => {
+    const track = (e: MouseEvent) => { lastMousePosRef.current = { x: e.clientX, y: e.clientY }; };
+    document.addEventListener('mouseup', track, true);
+    return () => document.removeEventListener('mouseup', track, true);
+  }, []);
+
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -553,6 +575,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             pendingSourceRef.current = null;
           }
           setCommentPopover(null);
+          setQuickLabelPicker(null);
 
           if (modeRef.current === 'redline') {
             // Auto-delete in redline mode
@@ -565,6 +588,14 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
               anchorEl: doms[0] as HTMLElement,
               contextText: source.text.slice(0, 80),
               isGlobal: false,
+              source,
+            });
+          } else if (modeRef.current === 'quickLabel') {
+            // Quick Label mode - show floating label picker directly
+            pendingSourceRef.current = source;
+            setQuickLabelPicker({
+              anchorEl: doms[0] as HTMLElement,
+              cursorHint: lastMousePosRef.current,
               source,
             });
           } else {
@@ -697,12 +728,44 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
 
     createAnnotationFromSource(
       highlighter, toolbarState.source, AnnotationType.COMMENT,
-      `${label.emoji} ${label.text}`, undefined, true
+      `${label.emoji} ${label.text}`, undefined, true, label.tip
     );
     pendingSourceRef.current = null;
     setToolbarState(null);
     window.getSelection()?.removeAllRanges();
   };
+
+  const handleFloatingQuickLabel = useCallback((label: QuickLabel) => {
+    if (!quickLabelPicker) return;
+
+    if (quickLabelPicker.source && highlighterRef.current) {
+      createAnnotationFromSource(
+        highlighterRef.current, quickLabelPicker.source, AnnotationType.COMMENT,
+        `${label.emoji} ${label.text}`, undefined, true, label.tip
+      );
+      pendingSourceRef.current = null;
+    } else if (quickLabelPicker.codeBlock) {
+      const codeEl = quickLabelPicker.codeBlock.element.querySelector('code');
+      if (codeEl) {
+        applyCodeBlockAnnotation(
+          quickLabelPicker.codeBlock.block.id, codeEl, AnnotationType.COMMENT,
+          `${label.emoji} ${label.text}`, undefined, true, label.tip
+        );
+      }
+    }
+
+    setQuickLabelPicker(null);
+    window.getSelection()?.removeAllRanges();
+  }, [quickLabelPicker]);
+
+  const handleQuickLabelPickerDismiss = useCallback(() => {
+    if (quickLabelPicker?.source && highlighterRef.current) {
+      highlighterRef.current.remove(quickLabelPicker.source.id);
+      pendingSourceRef.current = null;
+    }
+    setQuickLabelPicker(null);
+    window.getSelection()?.removeAllRanges();
+  }, [quickLabelPicker]);
 
   const handleToolbarClose = () => {
     if (toolbarState && highlighterRef.current) {
@@ -720,6 +783,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     text?: string,
     images?: ImageAttachment[],
     isQuickLabel?: boolean,
+    quickLabelTip?: string,
   ) => {
     const id = `codeblock-${Date.now()}`;
     const codeText = codeEl.textContent || '';
@@ -744,6 +808,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
       author: getIdentity(),
       images,
       ...(isQuickLabel ? { isQuickLabel: true } : {}),
+      ...(quickLabelTip ? { quickLabelTip } : {}),
     };
 
     justCreatedIdRef.current = newAnnotation.id;
@@ -765,7 +830,7 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
     if (!codeEl) return;
     applyCodeBlockAnnotation(
       hoveredCodeBlock.block.id, codeEl, AnnotationType.COMMENT,
-      `${label.emoji} ${label.text}`, undefined, true
+      `${label.emoji} ${label.text}`, undefined, true, label.tip
     );
     setHoveredCodeBlock(null);
   };
@@ -1080,6 +1145,16 @@ export const Viewer = forwardRef<ViewerHandle, ViewerProps>(({
             initialText={commentPopover.initialText}
             onSubmit={handleCommentSubmit}
             onClose={handleCommentClose}
+          />
+        )}
+
+        {/* Quick Label floating picker (quickLabel mode) */}
+        {quickLabelPicker && (
+          <FloatingQuickLabelPicker
+            anchorEl={quickLabelPicker.anchorEl}
+            cursorHint={quickLabelPicker.cursorHint}
+            onSelect={handleFloatingQuickLabel}
+            onDismiss={handleQuickLabelPickerDismiss}
           />
         )}
       </article>

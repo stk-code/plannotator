@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { AnnotationType } from "../types";
 import { createPortal } from "react-dom";
 import { useDismissOnOutsideAndEscape } from "../hooks/useDismissOnOutsideAndEscape";
-import { type QuickLabel, getQuickLabels, getLabelColors } from "../utils/quickLabels";
+import { type QuickLabel, getQuickLabels } from "../utils/quickLabels";
+import { FloatingQuickLabelPicker } from "./FloatingQuickLabelPicker";
 
 type PositionMode = 'center-above' | 'top-right';
 
@@ -50,6 +51,7 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
   const [copied, setCopied] = useState(false);
   const [showQuickLabels, setShowQuickLabels] = useState(false);
   const toolbarRef = useRef<HTMLDivElement>(null);
+  const zapButtonRef = useRef<HTMLButtonElement>(null);
   const quickLabels = useMemo(() => getQuickLabels(), []);
 
   const handleCopy = async () => {
@@ -101,21 +103,26 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
     };
   }, [element, positionMode, closeOnScrollOut, onClose]);
 
-  // Type-to-comment + Alt+N quick label shortcuts
+  // Type-to-comment + Alt+N / bare digit quick label shortcuts
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.isComposing) return;
       if (isEditableElement(e.target) || isEditableElement(document.activeElement)) return;
+
+      // When picker is open, let FloatingQuickLabelPicker own all keyboard input
+      if (showQuickLabels) return;
+
       if (e.key === "Escape") {
-        setShowQuickLabels(false);
         onClose();
         return;
       }
 
-      // Alt+1..8: apply quick label
-      if (e.altKey && e.code >= 'Digit1' && e.code <= 'Digit8') {
+      // Alt+N applies quick label (picker closed)
+      const isDigit = (e.code >= 'Digit1' && e.code <= 'Digit9') || e.code === 'Digit0';
+      if (isDigit && !e.ctrlKey && !e.metaKey && e.altKey) {
         e.preventDefault();
-        const index = parseInt(e.code.slice(5), 10) - 1;
+        const digit = parseInt(e.code.slice(5), 10);
+        const index = digit === 0 ? 9 : digit - 1;
         if (index < quickLabels.length) {
           onQuickLabel?.(quickLabels[index]);
         }
@@ -131,10 +138,10 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose, onRequestComment, onQuickLabel, quickLabels]);
+  }, [onClose, onRequestComment, onQuickLabel, quickLabels, showQuickLabels]);
 
   useDismissOnOutsideAndEscape({
-    enabled: true,
+    enabled: !showQuickLabels,
     ref: toolbarRef,
     onDismiss: onClose,
   });
@@ -202,23 +209,25 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
           className="text-accent hover:bg-accent/10"
         />
         {onQuickLabel && (
-          <div className="relative">
+          <>
             <ToolbarButton
+              ref={zapButtonRef}
               onClick={() => setShowQuickLabels(prev => !prev)}
               icon={<ZapIcon />}
               label="Quick label"
               className={showQuickLabels ? "text-amber-500 bg-amber-500/10" : "text-amber-500 hover:bg-amber-500/10"}
             />
-            {showQuickLabels && (
-              <QuickLabelDropdown
-                labels={quickLabels}
+            {showQuickLabels && zapButtonRef.current && (
+              <FloatingQuickLabelPicker
+                anchorEl={zapButtonRef.current}
                 onSelect={(label) => {
                   setShowQuickLabels(false);
                   onQuickLabel(label);
                 }}
+                onDismiss={() => setShowQuickLabels(false)}
               />
             )}
-          </div>
+          </>
         )}
         <div className="w-px h-5 bg-border mx-0.5" />
         <ToolbarButton
@@ -230,45 +239,6 @@ export const AnnotationToolbar: React.FC<AnnotationToolbarProps> = ({
       </div>
     </div>,
     document.body
-  );
-};
-
-// Quick Label Dropdown
-const QuickLabelDropdown: React.FC<{
-  labels: QuickLabel[];
-  onSelect: (label: QuickLabel) => void;
-}> = ({ labels, onSelect }) => {
-  const isMac = navigator.platform?.includes('Mac');
-  const altKey = isMac ? '⌥' : 'Alt+';
-
-  return (
-    <div
-      className="absolute top-full left-1/2 -translate-x-1/2 mt-1.5 bg-popover border border-border rounded-lg shadow-2xl p-2 min-w-[220px] z-[101]"
-      style={{ animation: 'annotation-toolbar-in 0.1s ease-out' }}
-      onMouseDown={(e) => e.stopPropagation()}
-    >
-      <div className="text-[10px] text-muted-foreground/60 px-1 mb-1.5 font-medium uppercase tracking-wide">Quick Labels</div>
-      <div className="flex flex-wrap gap-1">
-        {labels.map((label, index) => {
-          const colors = getLabelColors(label.color);
-          return (
-            <button
-              key={label.id}
-              onClick={() => onSelect(label)}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium transition-opacity hover:opacity-75 active:opacity-60"
-              style={{ backgroundColor: colors.bg, color: colors.text }}
-              title={index < 8 ? `${altKey}${index + 1}` : undefined}
-            >
-              <span>{label.emoji}</span>
-              <span>{label.text}</span>
-              {index < 8 && (
-                <span className="text-[9px] opacity-40 ml-0.5">{index + 1}</span>
-              )}
-            </button>
-          );
-        })}
-      </div>
-    </div>
   );
 };
 
@@ -309,17 +279,18 @@ const CloseIcon = () => (
   </svg>
 );
 
-const ToolbarButton: React.FC<{
+const ToolbarButton = React.forwardRef<HTMLButtonElement, {
   onClick: () => void;
   icon: React.ReactNode;
   label: string;
   className: string;
-}> = ({ onClick, icon, label, className }) => (
+}>(({ onClick, icon, label, className }, ref) => (
   <button
+    ref={ref}
     onClick={onClick}
     title={label}
     className={`p-1.5 rounded-md transition-colors ${className}`}
   >
     {icon}
   </button>
-);
+));
