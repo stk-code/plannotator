@@ -29,6 +29,7 @@ import {
 import { getGitContext, runGitDiff } from "@plannotator/server/git";
 import { writeRemoteShareLink } from "@plannotator/server/share-url";
 import { resolveMarkdownFile } from "@plannotator/server/resolve-file";
+import { planDenyFeedback } from "@plannotator/shared/feedback-templates";
 
 // @ts-ignore - Bun import attribute for text
 import indexHtml from "./plannotator.html" with { type: "text" };
@@ -439,18 +440,7 @@ Proceed with implementation, incorporating these notes where applicable.`;
 Plan Summary: ${args.summary}
 ${result.savedPath ? `Saved to: ${result.savedPath}` : ""}`;
           } else {
-            return `Plan needs revision.
-${result.savedPath ? `\nSaved to: ${result.savedPath}` : ""}
-
-The user has requested changes to your plan. Please review their feedback below and revise your plan accordingly.
-
-## User Feedback
-
-${result.feedback}
-
----
-
-Please revise your plan based on this feedback and call \`submit_plan\` again when ready.`;
+            return planDenyFeedback(result.feedback || "", "submit_plan");
           }
         },
       }),

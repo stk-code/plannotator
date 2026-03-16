@@ -49,6 +49,7 @@ import { resolveMarkdownFile } from "@plannotator/server/resolve-file";
 import { registerSession, unregisterSession, listSessions } from "@plannotator/server/sessions";
 import { openBrowser } from "@plannotator/server/browser";
 import { detectProjectName } from "@plannotator/server/project";
+import { planDenyFeedback } from "@plannotator/shared/feedback-templates";
 import path from "path";
 
 // Embed the built HTML at compile time
@@ -369,7 +370,7 @@ if (args[0] === "sessions") {
           hookEventName: "PermissionRequest",
           decision: {
             behavior: "deny",
-            message: `YOUR PLAN WAS NOT APPROVED. You MUST revise the plan to address ALL of the feedback below before calling ExitPlanMode again. Do not resubmit the same plan — use the Edit tool to make targeted changes to the plan file first.\n\n${result.feedback || "Plan changes requested"}`,
+            message: planDenyFeedback(result.feedback || "", "ExitPlanMode"),
           },
         },
       })
