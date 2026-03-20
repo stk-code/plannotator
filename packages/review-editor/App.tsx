@@ -6,6 +6,9 @@ import { Settings } from '@plannotator/ui/components/Settings';
 import { UpdateBanner } from '@plannotator/ui/components/UpdateBanner';
 import { storage } from '@plannotator/ui/utils/storage';
 import { CompletionOverlay } from '@plannotator/ui/components/CompletionOverlay';
+import { GitHubIcon } from '@plannotator/ui/components/GitHubIcon';
+import { RepoIcon } from '@plannotator/ui/components/RepoIcon';
+import { PullRequestIcon } from '@plannotator/ui/components/PullRequestIcon';
 import { getIdentity } from '@plannotator/ui/utils/identity';
 import { getAgentSwitchSettings, getEffectiveAgentName } from '@plannotator/ui/utils/agentSwitch';
 import { CodeAnnotation, CodeAnnotationType, SelectedLineRange } from '@plannotator/ui/types';
@@ -25,6 +28,9 @@ import type { DiffOption, WorktreeInfo, GitContext } from '@plannotator/shared/t
 import type { PRMetadata } from '@plannotator/shared/pr-provider';
 
 declare const __APP_VERSION__: string;
+
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+const altKey = isMac ? '⌥' : 'Alt';
 
 interface DiffFile {
   path: string;
@@ -116,6 +122,19 @@ const ReviewApp: React.FC = () => {
   }, [repoInfo]);
 
   const [prMetadata, setPrMetadata] = useState<PRMetadata | null>(null);
+  const [reviewDestination, setReviewDestination] = useState<'agent' | 'github'>(() =>
+    storage.getItem('plannotator-review-dest') === 'agent' ? 'agent' : 'github'
+  );
+  const [showDestinationMenu, setShowDestinationMenu] = useState(false);
+  const [isGitHubActioning, setIsGitHubActioning] = useState(false);
+  const [githubActionError, setGithubActionError] = useState<string | null>(null);
+  const [ghUser, setGhUser] = useState<string | null>(null);
+  const [githubCommentDialog, setGithubCommentDialog] = useState<{ action: 'approve' | 'comment' } | null>(null);
+  const [githubGeneralComment, setGithubGeneralComment] = useState('');
+  const [githubOpenPR, setGithubOpenPR] = useState(() => storage.getItem('plannotator-github-open-pr') !== 'false');
+
+  // Derived: GitHub mode is active when destination is GitHub AND we have PR metadata
+  const githubMode = reviewDestination === 'github' && !!prMetadata;
 
   const identity = useMemo(() => getIdentity(), []);
 
@@ -191,7 +210,9 @@ const ReviewApp: React.FC = () => {
 
       // Escape closes modals or clears search
       if (e.key === 'Escape') {
-        if (showExportModal) {
+        if (showDestinationMenu) {
+          setShowDestinationMenu(false);
+        } else if (showExportModal) {
           setShowExportModal(false);
         } else if (searchQuery) {
           clearSearch();
@@ -207,7 +228,7 @@ const ReviewApp: React.FC = () => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showExportModal, searchQuery, searchMatches, openSearch, stepSearchMatch, clearSearch, files, gitContext?.diffOptions]);
+  }, [showExportModal, showDestinationMenu, searchQuery, searchMatches, openSearch, stepSearchMatch, clearSearch, files, gitContext?.diffOptions]);
 
   // Get annotations for active file
   const activeFileAnnotations = useMemo(() => {
@@ -232,6 +253,7 @@ const ReviewApp: React.FC = () => {
         sharingEnabled?: boolean;
         repoInfo?: { display: string; branch?: string };
         prMetadata?: PRMetadata;
+        ghUser?: string;
         error?: string;
       }) => {
         const apiFiles = parseDiffToFiles(data.rawPatch);
@@ -251,6 +273,7 @@ const ReviewApp: React.FC = () => {
         if (data.sharingEnabled !== undefined) setSharingEnabled(data.sharingEnabled);
         if (data.repoInfo) setRepoInfo(data.repoInfo);
         if (data.prMetadata) setPrMetadata(data.prMetadata);
+        if (data.ghUser) setGhUser(data.ghUser);
         if (data.error) setDiffError(data.error);
       })
       .catch(() => {
@@ -585,24 +608,191 @@ const ReviewApp: React.FC = () => {
     }
   }, []);
 
+  // Build the payload for /api/pr-action from current annotations
+  const buildPRReviewPayload = useCallback((action: 'approve' | 'comment', generalComment?: string) => {
+    const fileAnnotations = annotations.filter(a => (a.scope ?? 'line') === 'line');
+    const fileScoped = annotations.filter(a => a.scope === 'file');
+
+    // Top-level body: file-scoped comments
+    const bodyParts: string[] = [];
+    if (fileScoped.length > 0) {
+      for (const ann of fileScoped) {
+        if (ann.text) bodyParts.push(`**${ann.filePath}:** ${ann.text}`);
+      }
+    }
+    const body = bodyParts.length > 0
+      ? `${generalComment ? generalComment + '\n\n' : ''}Review from Plannotator\n\n${bodyParts.join('\n\n')}`
+      : generalComment || 'Review from Plannotator';
+
+    // Inline file comments
+    const fileComments = fileAnnotations.map(ann => {
+      let commentBody = ann.text ?? '';
+      if (ann.suggestedCode) {
+        commentBody += `\n\n\`\`\`suggestion\n${ann.suggestedCode}\n\`\`\``;
+      }
+      const side = (ann.side === 'old' ? 'LEFT' : 'RIGHT') as 'LEFT' | 'RIGHT';
+      const isMultiLine = ann.lineStart != null && ann.lineEnd != null && ann.lineStart !== ann.lineEnd;
+      return {
+        path: ann.filePath,
+        line: ann.lineEnd ?? ann.lineStart,
+        side,
+        body: commentBody.trim(),
+        ...(isMultiLine && {
+          start_line: ann.lineStart,
+          start_side: side,
+        }),
+      };
+    }).filter(c => c.body.length > 0);
+
+    // Editor annotations (VS Code extension) — always on new/RIGHT side
+    // Only include annotations targeting files in the diff to avoid GitHub API rejection
+    const diffPaths = new Set(files.map(f => f.path));
+    for (const ea of editorAnnotations) {
+      if (!diffPaths.has(ea.filePath)) continue;
+      const body = ea.comment || `> ${ea.selectedText}`;
+      if (!body.trim()) continue;
+      const isMultiLine = ea.lineStart !== ea.lineEnd;
+      fileComments.push({
+        path: ea.filePath,
+        line: ea.lineEnd,
+        side: 'RIGHT' as const,
+        body: ea.comment ? `> ${ea.selectedText}\n\n${ea.comment}` : `> ${ea.selectedText}`,
+        ...(isMultiLine && {
+          start_line: ea.lineStart,
+          start_side: 'RIGHT' as const,
+        }),
+      });
+    }
+
+    return { action, body, fileComments };
+  }, [annotations, editorAnnotations, files]);
+
+  // Submit a review directly to GitHub
+  const handleGitHubAction = useCallback(async (action: 'approve' | 'comment', generalComment?: string) => {
+    setIsGitHubActioning(true);
+    setGithubActionError(null);
+    try {
+      const payload = buildPRReviewPayload(action, generalComment);
+      const prRes = await fetch('/api/pr-action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const prData = await prRes.json() as { ok?: boolean; prUrl?: string; error?: string };
+      if (!prRes.ok || prData.error) {
+        setGithubActionError(prData.error ?? 'Failed to submit PR review');
+        setIsGitHubActioning(false);
+        return;
+      }
+
+      // Open PR in browser (if opted in)
+      if (prData.prUrl && githubOpenPR) {
+        window.open(prData.prUrl, '_blank');
+      }
+
+      // Close the local session with a neutral message — don't send annotations to the agent
+      const agentSwitchSettings = getAgentSwitchSettings();
+      const effectiveAgent = getEffectiveAgentName(agentSwitchSettings);
+      const prLink = prData.prUrl ?? '';
+      const statusMessage = action === 'approve'
+        ? `Pull request approved on GitHub${prLink ? ': ' + prLink : ''}`
+        : `Pull request reviewed on GitHub${prLink ? ': ' + prLink : ''}`;
+      await fetch('/api/feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          approved: false,
+          feedback: statusMessage,
+          annotations: [],
+          ...(effectiveAgent && { agentSwitch: effectiveAgent }),
+        }),
+      });
+      setSubmitted(action === 'approve' ? 'approved' : 'feedback');
+    } catch (err) {
+      setGithubActionError(err instanceof Error ? err.message : 'Failed to submit PR review');
+      setIsGitHubActioning(false);
+    }
+  }, [buildPRReviewPayload, githubOpenPR]);
+
+  // Double-tap Option/Alt to toggle review destination (PR mode only)
+  useEffect(() => {
+    if (!prMetadata) return;
+    let lastAltUp = 0;
+    const DOUBLE_TAP_WINDOW = 300;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt' || e.repeat) return;
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    };
+
+    const handleKeyUp = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') return;
+      const now = Date.now();
+      if (now - lastAltUp < DOUBLE_TAP_WINDOW) {
+        setReviewDestination(prev => {
+          const next = prev === 'github' ? 'agent' : 'github';
+          storage.setItem('plannotator-review-dest', next);
+          setGithubActionError(null);
+          return next;
+        });
+        lastAltUp = 0;
+      } else {
+        lastAltUp = now;
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [prMetadata]);
+
   // Cmd/Ctrl+Enter keyboard shortcut to approve or send feedback
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey)) return;
 
+      // If the GitHub comment dialog is open, Cmd+Enter submits it
+      if (githubCommentDialog) {
+        if (submitted || isGitHubActioning) return;
+        const isApproveAction = githubCommentDialog.action === 'approve';
+        const canSubmit = isApproveAction || totalAnnotationCount > 0 || githubGeneralComment.trim();
+        if (!canSubmit) return;
+        e.preventDefault();
+        const { action } = githubCommentDialog;
+        setGithubCommentDialog(null);
+        handleGitHubAction(action, githubGeneralComment);
+        return;
+      }
+
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA') return;
       if (showExportModal || showNoAnnotationsDialog || showApproveWarning) return;
-      if (submitted || isSendingFeedback || isApproving) return;
+      if (submitted || isSendingFeedback || isApproving || isGitHubActioning) return;
       if (!origin) return; // Demo mode
 
       e.preventDefault();
 
-      // No annotations → Approve, otherwise → Send Feedback
-      if (totalAnnotationCount === 0) {
-        handleApprove();
+      if (githubMode) {
+        // GitHub mode: No annotations → Approve on GitHub, otherwise → Post Review
+        const isOwnPR = !!ghUser && prMetadata?.author === ghUser;
+        if (totalAnnotationCount === 0 && !isOwnPR) {
+          setGithubGeneralComment('');
+          setGithubCommentDialog({ action: 'approve' });
+        } else {
+          setGithubGeneralComment('');
+          setGithubCommentDialog({ action: 'comment' });
+        }
       } else {
-        handleSendFeedback();
+        // Agent mode: No annotations → Approve, otherwise → Send Feedback
+        if (totalAnnotationCount === 0) {
+          handleApprove();
+        } else {
+          handleSendFeedback();
+        }
       }
     };
 
@@ -610,8 +800,10 @@ const ReviewApp: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [
     showExportModal, showNoAnnotationsDialog, showApproveWarning,
-    submitted, isSendingFeedback, isApproving, origin, totalAnnotationCount,
-    handleApprove, handleSendFeedback
+    githubCommentDialog, githubGeneralComment,
+    submitted, isSendingFeedback, isApproving, isGitHubActioning,
+    origin, githubMode, ghUser, prMetadata, totalAnnotationCount,
+    handleApprove, handleSendFeedback, handleGitHubAction
   ]);
 
   if (isLoading) {
@@ -654,23 +846,26 @@ const ReviewApp: React.FC = () => {
             {prMetadata ? (
               <>
                 <span className="text-muted-foreground/40 hidden md:inline">|</span>
-                <span className="text-xs text-muted-foreground/60 font-mono hidden md:inline">
+                <span className="text-xs text-muted-foreground/60 hidden md:inline-flex items-center gap-1">
+                  <RepoIcon className="w-3 h-3" />
                   {prMetadata.owner}/{prMetadata.repo}
                 </span>
                 <a
                   href={prMetadata.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="text-xs text-accent/80 hover:text-accent hidden md:inline truncate max-w-[300px] transition-colors"
+                  className="text-xs text-accent/80 hover:text-accent hidden md:inline-flex items-center gap-1 truncate max-w-[300px] transition-colors"
                   title={prMetadata.title}
                 >
+                  <PullRequestIcon className="w-3 h-3 flex-shrink-0" />
                   #{prMetadata.number} {prMetadata.title}
                 </a>
               </>
             ) : repoInfo ? (
               <>
                 <span className="text-muted-foreground/40 hidden md:inline">|</span>
-                <span className="text-xs text-muted-foreground/60 font-mono hidden md:inline truncate max-w-[200px]" title={repoInfo.display}>
+                <span className="text-xs text-muted-foreground/60 hidden md:inline-flex items-center gap-1 truncate max-w-[200px]" title={repoInfo.display}>
+                  <RepoIcon className="w-3 h-3 flex-shrink-0" />
                   {repoInfo.display}
                 </span>
               </>
@@ -727,55 +922,168 @@ const ReviewApp: React.FC = () => {
 
             {origin ? (
               <>
-                {/* Send Feedback button - accent color, disabled if no annotations */}
+                {/* Destination dropdown (PR mode only) */}
+                {prMetadata && (
+                  <div className="relative">
+                    <button
+                      onClick={() => setShowDestinationMenu(prev => !prev)}
+                      className="flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors"
+                      title={reviewDestination === 'github' ? 'Posting to GitHub PR' : 'Sending to agent session'}
+                    >
+                      {reviewDestination === 'github' ? (
+                        <>
+                          <GitHubIcon className="w-3.5 h-3.5" />
+                          <span>GitHub</span>
+                        </>
+                      ) : 'Agent'}
+                      <svg className="w-3 h-3 opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+                    {showDestinationMenu && (
+                      <>
+                        <div className="fixed inset-0 z-40" onClick={() => setShowDestinationMenu(false)} />
+                        <div className="absolute right-0 top-full mt-1 py-1 bg-popover border border-border rounded-lg shadow-xl z-50 min-w-[160px]">
+                          <button
+                            onClick={() => {
+                              setReviewDestination('github');
+                              storage.setItem('plannotator-review-dest', 'github');
+                              setShowDestinationMenu(false);
+                              setGithubActionError(null);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              reviewDestination === 'github'
+                                ? 'text-foreground bg-muted/50'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+                            }`}
+                          >
+                            <div className="font-medium">GitHub</div>
+                            <div className="text-muted-foreground/60">Post to PR</div>
+                          </button>
+                          <button
+                            onClick={() => {
+                              setReviewDestination('agent');
+                              storage.setItem('plannotator-review-dest', 'agent');
+                              setShowDestinationMenu(false);
+                              setGithubActionError(null);
+                            }}
+                            className={`w-full text-left px-3 py-1.5 text-xs transition-colors ${
+                              reviewDestination === 'agent'
+                                ? 'text-foreground bg-muted/50'
+                                : 'text-muted-foreground hover:text-foreground hover:bg-muted/30'
+                            }`}
+                          >
+                            <div className="font-medium">Agent</div>
+                            <div className="text-muted-foreground/60">Send to session</div>
+                          </button>
+                          <div className="border-t border-border/50 mt-1 pt-1 px-3 py-1">
+                            <span className="text-[10px] text-muted-foreground/40">
+                              <kbd className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-muted border border-border/60 border-b-[2px] text-[9px] font-mono leading-none text-foreground/60 shadow-sm">{altKey}</kbd>
+                              <kbd className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-muted border border-border/60 border-b-[2px] text-[9px] font-mono leading-none text-foreground/60 shadow-sm ml-0.5">{altKey}</kbd>
+                              <span className="ml-1.5">to toggle</span>
+                            </span>
+                          </div>
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
+
+                {/* GitHub error message */}
+                {githubActionError && (
+                  <div
+                    className="text-xs text-destructive px-2 py-1 bg-destructive/10 rounded border border-destructive/20 max-w-[200px] truncate"
+                    title={githubActionError}
+                  >
+                    {githubActionError}
+                  </div>
+                )}
+
+                {/* Send Feedback button — always the same label */}
                 <button
-                  onClick={handleSendFeedback}
-                  disabled={isSendingFeedback || isApproving || totalAnnotationCount === 0}
+                  onClick={() => {
+                    if (githubMode) {
+                      setGithubGeneralComment('');
+                      setGithubCommentDialog({ action: 'comment' });
+                    } else {
+                      handleSendFeedback();
+                    }
+                  }}
+                  disabled={
+                    isSendingFeedback || isApproving || isGitHubActioning ||
+                    (!githubMode && totalAnnotationCount === 0)
+                  }
                   className={`p-1.5 md:px-2.5 md:py-1 rounded-md text-xs font-medium transition-all ${
-                    isSendingFeedback || isApproving
+                    isSendingFeedback || isApproving || isGitHubActioning
                       ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-                      : totalAnnotationCount === 0
+                      : !githubMode && totalAnnotationCount === 0
                         ? 'opacity-50 cursor-not-allowed bg-accent/10 text-accent/50'
                         : 'bg-accent/15 text-accent hover:bg-accent/25 border border-accent/30'
                   }`}
-                  title={totalAnnotationCount === 0 ? "Add annotations to send feedback" : "Send feedback"}
+                  title={!githubMode && totalAnnotationCount === 0 ? "Add annotations to send feedback" : "Send feedback"}
                 >
                   <svg className="w-4 h-4 md:hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                     <path strokeLinecap="round" strokeLinejoin="round" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
                   </svg>
-                  <span className="hidden md:inline">{isSendingFeedback ? 'Sending...' : 'Send Feedback'}</span>
+                  <span className="hidden md:inline">{
+                    isSendingFeedback || isGitHubActioning
+                      ? (githubMode ? 'Posting...' : 'Sending...')
+                      : (githubMode ? 'Post Comments' : 'Send Feedback')
+                  }</span>
                 </button>
 
-                {/* Approve button - green/success, dimmed if annotations exist */}
+                {/* Approve button — always the same label */}
                 <div className="relative group/approve">
                   <button
                     onClick={() => {
-                      if (totalAnnotationCount > 0) {
-                        setShowApproveWarning(true);
+                      if (githubMode) {
+                        if (ghUser && prMetadata?.author === ghUser) return;
+                        setGithubGeneralComment('');
+                        setGithubCommentDialog({ action: 'approve' });
                       } else {
-                        handleApprove();
+                        if (totalAnnotationCount > 0) {
+                          setShowApproveWarning(true);
+                        } else {
+                          handleApprove();
+                        }
                       }
                     }}
-                    disabled={isSendingFeedback || isApproving}
+                    disabled={
+                      isSendingFeedback || isApproving || isGitHubActioning ||
+                      (githubMode && !!ghUser && prMetadata?.author === ghUser)
+                    }
                     className={`px-2 py-1 md:px-2.5 rounded-md text-xs font-medium transition-all ${
-                      isSendingFeedback || isApproving
+                      isSendingFeedback || isApproving || isGitHubActioning
                         ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
-                        : totalAnnotationCount > 0
-                          ? 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground'
-                          : 'bg-success text-success-foreground hover:opacity-90'
+                        : githubMode && ghUser && prMetadata?.author === ghUser
+                          ? 'opacity-40 cursor-not-allowed bg-muted text-muted-foreground'
+                          : !githubMode && totalAnnotationCount > 0
+                            ? 'bg-success/50 text-success-foreground/70 hover:bg-success hover:text-success-foreground'
+                            : 'bg-success text-success-foreground hover:opacity-90'
                     }`}
-                    title="Approve - no changes needed"
+                    title={
+                      githubMode && ghUser && prMetadata?.author === ghUser
+                        ? "You can't approve your own PR"
+                        : "Approve - no changes needed"
+                    }
                   >
                     <span className="md:hidden">{isApproving ? '...' : 'OK'}</span>
                     <span className="hidden md:inline">{isApproving ? 'Approving...' : 'Approve'}</span>
                   </button>
-                  {totalAnnotationCount > 0 && (
+                  {/* Tooltip: own PR warning OR annotations-lost warning */}
+                  {githubMode && ghUser && prMetadata?.author === ghUser ? (
+                    <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-48 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
+                      <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
+                      <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
+                      You can't approve your own pull request on GitHub.
+                    </div>
+                  ) : !githubMode && totalAnnotationCount > 0 ? (
                     <div className="absolute top-full right-0 mt-2 px-3 py-2 bg-popover border border-border rounded-lg shadow-xl text-xs text-foreground w-56 text-center opacity-0 invisible group-hover/approve:opacity-100 group-hover/approve:visible transition-all pointer-events-none z-50">
                       <div className="absolute bottom-full right-4 border-4 border-transparent border-b-border" />
                       <div className="absolute bottom-full right-4 mt-px border-4 border-transparent border-b-popover" />
                       Your {totalAnnotationCount} annotation{totalAnnotationCount !== 1 ? 's' : ''} won't be sent if you approve.
                     </div>
-                  )}
+                  ) : null}
                 </div>
               </>
             ) : (
@@ -1057,15 +1365,78 @@ const ReviewApp: React.FC = () => {
           submitted={submitted}
           title={submitted === 'approved' ? 'Changes Approved' : 'Feedback Sent'}
           subtitle={
-            submitted === 'approved'
-              ? `${origin === 'claude-code' ? 'Claude Code' : origin === 'pi' ? 'Pi' : 'OpenCode'} will proceed with the changes.`
-              : `${origin === 'claude-code' ? 'Claude Code' : origin === 'pi' ? 'Pi' : 'OpenCode'} will address your review feedback.`
+            githubMode
+              ? submitted === 'approved'
+                ? 'Your approval was submitted to GitHub.'
+                : 'Your feedback was submitted to GitHub.'
+              : submitted === 'approved'
+                ? `${origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'} will proceed with the changes.`
+                : `${origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'} will address your review feedback.`
           }
-          agentLabel={origin === 'claude-code' ? 'Claude Code' : origin === 'pi' ? 'Pi' : 'OpenCode'}
+          agentLabel={origin === 'claude-code' ? 'Claude Code' : origin === 'opencode' ? 'OpenCode' : origin === 'pi' ? 'Pi' : 'Your agent'}
         />
 
         {/* Update notification */}
         <UpdateBanner origin={origin} />
+
+        {/* GitHub general comment dialog */}
+        {githubCommentDialog && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center bg-background/80 backdrop-blur-sm p-4">
+            <div className="bg-card border border-border rounded-xl w-full max-w-sm shadow-2xl p-6">
+              <h3 className="font-semibold mb-1">
+                {githubCommentDialog.action === 'approve' ? 'Approve PR' : 'Post Review Comment'}
+              </h3>
+              <p className="text-sm text-muted-foreground mb-3">
+                Add a general comment to the review (optional).
+              </p>
+              <textarea
+                autoFocus
+                value={githubGeneralComment}
+                onChange={e => setGithubGeneralComment(e.target.value)}
+                placeholder="Leave a comment..."
+                rows={4}
+                className="w-full rounded-md border border-border bg-background text-sm px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-primary mb-3"
+              />
+              <label className="flex items-center gap-2 text-sm text-muted-foreground mb-4 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={githubOpenPR}
+                  onChange={e => {
+                    setGithubOpenPR(e.target.checked);
+                    storage.setItem('plannotator-github-open-pr', String(e.target.checked));
+                  }}
+                  className="rounded border-border"
+                />
+                Open PR after submitting
+              </label>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setGithubCommentDialog(null)}
+                  className="px-4 py-2 rounded-md text-sm font-medium bg-muted text-muted-foreground hover:bg-muted/80"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    const { action } = githubCommentDialog;
+                    setGithubCommentDialog(null);
+                    handleGitHubAction(action, githubGeneralComment);
+                  }}
+                  disabled={githubCommentDialog.action !== 'approve' && totalAnnotationCount === 0 && !githubGeneralComment.trim()}
+                  className={`px-4 py-2 rounded-md text-sm font-medium transition-opacity ${
+                    githubCommentDialog.action !== 'approve' && totalAnnotationCount === 0 && !githubGeneralComment.trim()
+                      ? 'opacity-50 cursor-not-allowed bg-muted text-muted-foreground'
+                      : githubCommentDialog.action === 'approve'
+                        ? 'bg-success text-success-foreground hover:opacity-90'
+                        : 'bg-primary text-primary-foreground hover:opacity-90'
+                  }`}
+                >
+                  {githubCommentDialog.action === 'approve' ? 'Approve' : 'Post Comments'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </ThemeProvider>
   );

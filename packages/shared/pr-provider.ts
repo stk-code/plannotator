@@ -18,6 +18,11 @@ export interface PRRuntime {
     cmd: string,
     args: string[],
   ) => Promise<CommandResult>;
+  runCommandWithInput?: (
+    cmd: string,
+    args: string[],
+    input: string,
+  ) => Promise<CommandResult>;
 }
 
 export interface PRRef {
@@ -125,6 +130,18 @@ export async function checkGhAuth(runtime: PRRuntime): Promise<void> {
     throw new Error(
       `GitHub CLI not authenticated. Run \`gh auth login\` first.\n${stderr}`,
     );
+  }
+}
+
+export async function getGhUser(runtime: PRRuntime): Promise<string | null> {
+  try {
+    const result = await runtime.runCommand("gh", ["api", "user", "--jq", ".login"]);
+    if (result.exitCode === 0 && result.stdout.trim()) {
+      return result.stdout.trim();
+    }
+    return null;
+  } catch {
+    return null;
   }
 }
 
@@ -294,5 +311,53 @@ export async function fetchPRFileContent(
     return Buffer.from(cleaned, "base64").toString("utf-8");
   } catch {
     return null;
+  }
+}
+
+// --- Submit PR Review ---
+
+export interface PRReviewFileComment {
+  path: string;
+  line: number;
+  side: "LEFT" | "RIGHT";
+  body: string;
+  start_line?: number;
+  start_side?: "LEFT" | "RIGHT";
+}
+
+export async function submitPRReview(
+  runtime: PRRuntime,
+  ref: PRRef,
+  headSha: string,
+  action: "approve" | "comment",
+  body: string,
+  fileComments: PRReviewFileComment[],
+): Promise<void> {
+  const payload = JSON.stringify({
+    commit_id: headSha,
+    body,
+    event: action === "approve" ? "APPROVE" : "COMMENT",
+    comments: fileComments,
+  });
+
+  const endpoint = `repos/${ref.owner}/${ref.repo}/pulls/${ref.number}/reviews`;
+
+  let result: CommandResult;
+
+  if (runtime.runCommandWithInput) {
+    result = await runtime.runCommandWithInput(
+      "gh",
+      ["api", endpoint, "--method", "POST", "--input", "-"],
+      payload,
+    );
+  } else {
+    // Fallback: write payload to a temp file approach via gh api with --input flag
+    // This branch should not be reached in practice since Bun runtime provides runCommandWithInput
+    throw new Error("Runtime does not support stdin input; cannot submit PR review");
+  }
+
+  if (result.exitCode !== 0) {
+    const message = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`;
+    throw new Error(`Failed to submit PR review: ${message}`);
   }
 }
