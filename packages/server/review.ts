@@ -16,6 +16,7 @@ import { handleImage, handleUpload, handleAgents, handleServerReady, handleDraft
 import { contentHash, deleteDraft } from "./draft";
 import { createEditorAnnotationHandler } from "./editor-annotations";
 import { type PRMetadata, type PRReviewFileComment, fetchPRFileContent, fetchPRContext, submitPRReview, getUser, prRefFromMetadata, getDisplayRepo, getMRLabel, getMRNumberLabel } from "./pr";
+import { createAIEndpoints, ProviderRegistry, SessionManager, createProvider, type AIEndpoints } from "@plannotator/ai";
 
 // Re-export utilities
 export { isRemoteSession, getServerPort } from "./remote";
@@ -98,6 +99,56 @@ export async function startReviewServer(
   let currentGitRef = options.gitRef;
   let currentDiffType: DiffType = options.diffType || "uncommitted";
   let currentError = options.error;
+
+  // AI provider setup (graceful — AI features degrade if SDK unavailable)
+  const aiRegistry = new ProviderRegistry();
+  const aiSessionManager = new SessionManager();
+  let aiEndpoints: AIEndpoints | null = null;
+
+  // Try Claude Agent SDK
+  try {
+    await import("@plannotator/ai/providers/claude-agent-sdk");
+    const claudePath = Bun.which("claude");
+    const provider = await createProvider({
+      type: "claude-agent-sdk",
+      cwd: process.cwd(),
+      ...(claudePath && { claudeExecutablePath: claudePath }),
+    });
+    aiRegistry.register(provider);
+  } catch {
+    // Claude SDK not available
+  }
+
+  // Try Codex SDK
+  try {
+    await import("@plannotator/ai/providers/codex-sdk");
+    // Eagerly verify the SDK is importable so we don't advertise a broken provider.
+    await import("@openai/codex-sdk");
+    const codexPath = Bun.which("codex");
+    const provider = await createProvider({
+      type: "codex-sdk",
+      cwd: process.cwd(),
+      ...(codexPath && { codexExecutablePath: codexPath }),
+    });
+    aiRegistry.register(provider);
+  } catch {
+    // Codex SDK not available
+  }
+
+  // Create endpoints if any provider registered
+  if (aiRegistry.size > 0) {
+    aiEndpoints = createAIEndpoints({
+      registry: aiRegistry,
+      sessionManager: aiSessionManager,
+      getCwd: () => {
+        if (currentDiffType.startsWith("worktree:")) {
+          const parsed = parseWorktreeDiffType(currentDiffType);
+          if (parsed) return parsed.path;
+        }
+        return gitContext?.cwd ?? process.cwd();
+      },
+    });
+  }
 
   const isRemote = isRemoteSession();
   const configuredPort = getServerPort();
@@ -371,6 +422,12 @@ export async function startReviewServer(
             }
           }
 
+          // AI endpoints
+          if (aiEndpoints && url.pathname.startsWith("/api/ai/")) {
+            const handler = aiEndpoints[url.pathname as keyof AIEndpoints];
+            if (handler) return handler(req);
+          }
+
           // Favicon
           if (url.pathname === "/favicon.svg") return handleFavicon();
 
@@ -416,6 +473,10 @@ export async function startReviewServer(
     url: serverUrl,
     isRemote,
     waitForDecision: () => decisionPromise,
-    stop: () => server.stop(),
+    stop: () => {
+      aiSessionManager.disposeAll();
+      aiRegistry.disposeAll();
+      server.stop();
+    },
   };
 }

@@ -56,8 +56,11 @@ import { KeyboardShortcuts } from './KeyboardShortcuts';
 import { type QuickLabel, getQuickLabels, saveQuickLabels, resetQuickLabels, DEFAULT_QUICK_LABELS, getLabelColors, LABEL_COLOR_MAP } from '../utils/quickLabels';
 import { hasNewSettings, markNewSettingsSeen } from '../utils/newSettingsHint';
 import { ThemeTab } from './ThemeTab';
+import { isMac, modKey, altKey } from '../utils/platform';
+import { getAIProviderSettings } from '../utils/aiProvider';
+import { AISettingsTab } from './AISettingsTab';
 
-type SettingsTab = 'general' | 'theme' | 'display' | 'saving' | 'labels' | 'shortcuts' | 'obsidian' | 'bear' | 'octarine';
+type SettingsTab = 'general' | 'theme' | 'display' | 'saving' | 'labels' | 'shortcuts' | 'ai' | 'obsidian' | 'bear' | 'octarine';
 
 interface SettingsProps {
   taterMode: boolean;
@@ -70,9 +73,11 @@ interface SettingsProps {
   /** Externally controlled open state (for mobile menu integration) */
   externalOpen?: boolean;
   onExternalClose?: () => void;
+  /** Available AI providers (from /api/ai/capabilities). */
+  aiProviders?: Array<{ id: string; name: string; capabilities: Record<string, boolean> }>;
 }
 
-export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', onUIPreferencesChange, externalOpen, onExternalClose }) => {
+export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange, onIdentityChange, origin, mode = 'plan', onUIPreferencesChange, externalOpen, onExternalClose, aiProviders = [] }) => {
   const [showDialog, setShowDialog] = useState(false);
   const [activeTab, setActiveTab] = useState<SettingsTab>('general');
   const [identity, setIdentity] = useState('');
@@ -96,6 +101,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const [editingTipIndex, setEditingTipIndex] = useState<number | null>(null);
   const [editingTipValue, setEditingTipValue] = useState('');
   const [showNewHints, setShowNewHints] = useState(() => hasNewSettings());
+  const [aiProvider, setAiProvider] = useState<string | null>(null);
 
   // Fetch available agents for OpenCode
   const { agents: availableAgents, validateAgent, getAgentWarning } = useAgents(origin ?? null);
@@ -108,9 +114,12 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
       t.push({ id: 'saving', label: 'Saving' });
       t.push({ id: 'labels', label: 'Labels' });
     }
+    if (mode === 'review' && aiProviders.length > 0) {
+      t.push({ id: 'ai', label: 'AI' });
+    }
     t.push({ id: 'shortcuts', label: 'Shortcuts' });
     return t;
-  }, [mode]);
+  }, [mode, aiProviders.length]);
 
   const integrationTabs: { id: SettingsTab; label: string }[] = mode === 'plan'
     ? [{ id: 'obsidian', label: 'Obsidian' }, { id: 'bear', label: 'Bear' }, { id: 'octarine', label: 'Octarine' }]
@@ -141,6 +150,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
       setAutoCloseDelayState(getAutoCloseDelay());
       setDefaultNotesApp(getDefaultNotesApp());
       setQuickLabelsState(getQuickLabels());
+      setAiProvider(getAIProviderSettings().providerId);
 
       // Validate agent setting when dialog opens
       if (origin === 'opencode') {
@@ -268,7 +278,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
           onClick={() => setShowDialog(false)}
         >
           <div
-            className="bg-card border border-border rounded-xl w-full max-w-2xl shadow-2xl relative"
+            className="bg-card border border-border rounded-xl w-full max-w-2xl max-h-[85vh] flex flex-col shadow-2xl relative overflow-hidden"
             onClick={e => e.stopPropagation()}
           >
             {taterMode && <TaterSpritePullup />}
@@ -284,7 +294,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
               </button>
             </div>
 
-            <div className="flex flex-col md:flex-row md:min-h-[420px]">
+            <div className="flex flex-col md:flex-row md:min-h-[420px] flex-1 min-h-0 overflow-hidden">
               {/* Mobile: horizontal tab bar */}
               <nav className="md:hidden flex overflow-x-auto border-b border-border px-2 py-1.5 gap-1 flex-shrink-0">
                 {[...mainTabs, ...integrationTabs].map(tab => (
@@ -351,7 +361,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
               </nav>
 
               {/* Content — scrollable */}
-              <div className="flex-1 p-4 space-y-4 overflow-y-auto max-h-[85vh]">
+              <div className="flex-1 p-4 space-y-4 overflow-y-auto min-h-0">
 
                 {/* === GENERAL TAB === */}
                 {activeTab === 'general' && (
@@ -756,7 +766,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                       <div>
                         <div className="text-sm font-medium">Default Save Action</div>
                         <div className="text-xs text-muted-foreground">
-                          Used for keyboard shortcut ({navigator.platform?.includes('Mac') ? 'Cmd' : 'Ctrl'}+S)
+                          Used for keyboard shortcut ({modKey}+S)
                         </div>
                       </div>
                       <select
@@ -774,8 +784,8 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                         {defaultNotesApp === 'ask'
                           ? 'Opens Export dialog with Notes tab'
                           : defaultNotesApp === 'download'
-                            ? `${navigator.platform?.includes('Mac') ? 'Cmd' : 'Ctrl'}+S downloads the annotations file`
-                            : `${navigator.platform?.includes('Mac') ? 'Cmd' : 'Ctrl'}+S saves directly to ${{ obsidian: 'Obsidian', bear: 'Bear', octarine: 'Octarine' }[defaultNotesApp] ?? defaultNotesApp}`}
+                            ? `${modKey}+S downloads the annotations file`
+                            : `${modKey}+S saves directly to ${{ obsidian: 'Obsidian', bear: 'Bear', octarine: 'Octarine' }[defaultNotesApp] ?? defaultNotesApp}`}
                       </div>
                     </div>
 
@@ -923,7 +933,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                                 ))}
                               </select>
                               <span className="text-[10px] text-muted-foreground/50 font-mono w-8 text-center flex-shrink-0">
-                                {index < 10 ? `${navigator.platform?.includes('Mac') ? '⌥' : 'Alt+'}${index === 9 ? '0' : index + 1}` : ''}
+                                {index < 10 ? `${altKey}${isMac ? '' : '+'}${index === 9 ? '0' : index + 1}` : ''}
                               </span>
                               <button
                                 onClick={() => {
@@ -1010,7 +1020,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                     )}
 
                     <div className="text-[10px] text-muted-foreground/70">
-                      Use {navigator.platform?.includes('Mac') ? '⌥' : 'Alt+'}1 through {navigator.platform?.includes('Mac') ? '⌥' : 'Alt+'}0 when the annotation toolbar is visible to apply a label instantly.
+                      Use {altKey}{isMac ? '' : '+'}1 through {altKey}{isMac ? '' : '+'}0 when the annotation toolbar is visible to apply a label instantly.
                     </div>
                   </>
                 )}
@@ -1018,6 +1028,15 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
                 {/* === SHORTCUTS TAB === */}
                 {activeTab === 'shortcuts' && (
                   <KeyboardShortcuts mode={mode} />
+                )}
+
+                {/* === AI TAB === */}
+                {activeTab === 'ai' && (
+                  <AISettingsTab
+                    providers={aiProviders}
+                    selectedProviderId={aiProvider}
+                    onProviderChange={setAiProvider}
+                  />
                 )}
 
                 {/* === OBSIDIAN TAB === */}
