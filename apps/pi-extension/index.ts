@@ -54,6 +54,7 @@ import {
 	PLAN_SUBMIT_TOOL,
 	type Phase,
 	stripPlanningOnlyTools,
+
 } from "./tool-scope.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
@@ -85,6 +86,7 @@ try {
 } catch {
 	// HTML not built yet — review feature will be unavailable
 }
+
 
 type SavedPhaseState = {
 	activeTools: string[];
@@ -224,6 +226,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 	}
 
 	function persistState(): void {
+
 		pi.appendEntry("plannotator", { phase, planFilePath, savedState });
 	}
 
@@ -301,6 +304,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 	async function exitToIdle(ctx: ExtensionContext): Promise<void> {
 		phase = "idle";
 		checklistItems = [];
+
 		await restoreSavedState(ctx);
 		savedState = null;
 		updateStatus(ctx);
@@ -708,6 +712,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 			// Non-interactive or no HTML: auto-approve
 			if (!ctx.hasUI || !planHtmlContent) {
 				phase = "executing";
+
 				await applyPhaseConfig(ctx, { restoreSavedState: true });
 				pi.appendEntry("plannotator-execute", { planFilePath });
 				persistState();
@@ -746,6 +751,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 
 			if (result.approved) {
 				phase = "executing";
+
 				await applyPhaseConfig(ctx, { restoreSavedState: true });
 				pi.appendEntry("plannotator-execute", { planFilePath });
 				persistState();
@@ -1021,6 +1027,7 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 			);
 			phase = "idle";
 			checklistItems = [];
+
 			await restoreSavedState(ctx);
 			savedState = null;
 			updateStatus(ctx);
@@ -1055,11 +1062,13 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 				(e: { type: string; customType?: string }) =>
 					e.type === "custom" && e.customType === "plannotator",
 			)
+
 			.pop() as { data?: PersistedPlannotatorState } | undefined;
 
 		if (stateEntry?.data) {
 			phase = stateEntry.data.phase ?? phase;
 			planFilePath = stateEntry.data.planFilePath ?? planFilePath;
+
 			savedState = stateEntry.data.savedState ?? savedState;
 		}
 
@@ -1096,6 +1105,7 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 				phase = "idle";
 			}
 		}
+
 
 		if (phase === "planning") {
 			checklistItems = [];
