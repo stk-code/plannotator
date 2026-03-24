@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { homedir } from "node:os";
 import type { ThinkingLevel } from "@mariozechner/pi-agent-core";
 
 export type PhaseName = "planning" | "executing" | "reviewing";
@@ -61,7 +61,13 @@ export interface PromptRenderResult {
 
 const INTERNAL_CONFIG_PATH = join(dirname(fileURLToPath(import.meta.url)), "plannotator.json");
 const PHASES: PhaseName[] = ["planning", "executing", "reviewing"];
-const THINKING_LEVELS = new Set(["minimal", "low", "medium", "high", "xhigh"] as const);
+const THINKING_LEVELS = new Set<string>(["minimal", "low", "medium", "high", "xhigh"]);
+
+function getAgentConfigDir(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  if (envDir) return envDir;
+  return join(process.env.HOME || process.env.USERPROFILE || homedir(), ".pi", "agent");
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -197,7 +203,7 @@ export function loadPlannotatorConfig(cwd: string): LoadedPlannotatorConfig {
   const internal = loadConfigSource(INTERNAL_CONFIG_PATH);
   if (internal.warning) warnings.push(internal.warning);
 
-  const globalPath = join(getAgentDir(), "plannotator.json");
+  const globalPath = join(getAgentConfigDir(), "plannotator.json");
   const globalConfig = loadConfigSource(globalPath);
   if (globalConfig.warning) warnings.push(globalConfig.warning);
 
@@ -247,7 +253,8 @@ function resolveTools(base: string[] | null | undefined, override: string[] | nu
 
 function resolveString(base: string | null | undefined, override: string | null | undefined): string | undefined {
   if (override !== undefined) {
-    return override ?? undefined;
+    if (override === null || override === "") return undefined;
+    return override;
   }
   return base ?? undefined;
 }
