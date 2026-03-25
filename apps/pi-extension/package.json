@@ -1,6 +1,10 @@
 {
   "name": "@plannotator/pi-extension",
+<<<<<<< HEAD
   "version": "0.16.2",
+=======
+  "version": "0.15.3",
+>>>>>>> 7ccace6 (chore: bump pi-extension to 0.15.3)
   "type": "module",
   "description": "Plannotator extension for Pi coding agent - interactive plan review with visual annotation",
   "author": "backnotprop",
