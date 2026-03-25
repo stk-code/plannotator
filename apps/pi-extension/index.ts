@@ -54,7 +54,6 @@ import {
 	PLAN_SUBMIT_TOOL,
 	type Phase,
 	stripPlanningOnlyTools,
-
 } from "./tool-scope.ts";
 
 // ── Types ──────────────────────────────────────────────────────────────
