@@ -2,6 +2,7 @@
   "name": "@plannotator/pi-extension",
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
   "version": "0.16.2",
 =======
   "version": "0.15.3",
@@ -9,6 +10,9 @@
 =======
   "version": "0.15.4",
 >>>>>>> 090b8d9 (feat(pi): ship compound planning skill in published package)
+=======
+  "version": "0.15.5",
+>>>>>>> 9746344 (chore: bump version to 0.15.5)
   "type": "module",
   "description": "Plannotator extension for Pi coding agent - interactive plan review with visual annotation",
   "author": "backnotprop",
