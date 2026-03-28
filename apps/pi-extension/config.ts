@@ -98,6 +98,7 @@ function normalizeThinking(value: unknown): ThinkingLevel | null | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
   if (!trimmed) return null;
+
   return THINKING_LEVELS.has(trimmed as ThinkingLevel) ? (trimmed as ThinkingLevel) : undefined;
 }
 

@@ -87,6 +87,7 @@ try {
 }
 
 
+
 type SavedPhaseState = {
 	activeTools: string[];
 	model?: { provider: string; id: string };
@@ -226,6 +227,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 
 	function persistState(): void {
 
+
 		pi.appendEntry("plannotator", { phase, planFilePath, savedState });
 	}
 
@@ -303,6 +305,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 	async function exitToIdle(ctx: ExtensionContext): Promise<void> {
 		phase = "idle";
 		checklistItems = [];
+
 
 		await restoreSavedState(ctx);
 		savedState = null;
@@ -712,6 +715,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 			if (!ctx.hasUI || !planHtmlContent) {
 				phase = "executing";
 
+
 				await applyPhaseConfig(ctx, { restoreSavedState: true });
 				pi.appendEntry("plannotator-execute", { planFilePath });
 				persistState();
@@ -750,6 +754,7 @@ export default function plannotator(pi: ExtensionAPI): void {
 
 			if (result.approved) {
 				phase = "executing";
+
 
 				await applyPhaseConfig(ctx, { restoreSavedState: true });
 				pi.appendEntry("plannotator-execute", { planFilePath });
@@ -1027,6 +1032,7 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 			phase = "idle";
 			checklistItems = [];
 
+
 			await restoreSavedState(ctx);
 			savedState = null;
 			updateStatus(ctx);
@@ -1062,11 +1068,13 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 					e.type === "custom" && e.customType === "plannotator",
 			)
 
+
 			.pop() as { data?: PersistedPlannotatorState } | undefined;
 
 		if (stateEntry?.data) {
 			phase = stateEntry.data.phase ?? phase;
 			planFilePath = stateEntry.data.planFilePath ?? planFilePath;
+
 
 			savedState = stateEntry.data.savedState ?? savedState;
 		}
@@ -1104,6 +1112,7 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
 				phase = "idle";
 			}
 		}
+
 
 
 		if (phase === "planning") {
