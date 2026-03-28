@@ -21,10 +21,11 @@
 import { readFileSync, existsSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentMessage } from "@mariozechner/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@mariozechner/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@mariozechner/pi-ai";
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { buildPromptVariables, formatTodoList, loadPlannotatorConfig, renderTemplate, resolvePhaseProfile } from "./config.js";
 import { Key } from "@mariozechner/pi-tui";
 import { markCompletedSteps, parseChecklist, type ChecklistItem } from "./utils.js";
 import {
@@ -64,10 +65,19 @@ try {
   // HTML not built yet — review feature will be unavailable
 }
 
-/** Extra tools to ensure are available during planning (on top of whatever is already active). */
-const PLANNING_EXTRA_TOOLS = ["grep", "find", "ls", "exit_plan_mode"];
-
 type Phase = "idle" | "planning" | "executing";
+
+interface SavedPhaseState {
+  activeTools: string[];
+  model?: { provider: string; id: string };
+  thinkingLevel: ThinkingLevel;
+}
+
+interface PersistedPlannotatorState {
+  phase: Phase;
+  planFilePath?: string;
+  savedState?: SavedPhaseState;
+}
 
 function isAssistantMessage(m: AgentMessage): m is AssistantMessage {
   return m.role === "assistant" && Array.isArray(m.content);
@@ -103,11 +113,24 @@ function getStartupErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : "Unknown error";
 }
 
+function getPlanReviewAvailabilityWarning(options: { hasUI: boolean; hasPlanHtml: boolean }): string | null {
+  const { hasUI, hasPlanHtml } = options;
+  if (hasUI && hasPlanHtml) return null;
+  if (!hasUI && !hasPlanHtml) {
+    return "Plannotator: interactive plan review is unavailable in this session (no UI support and missing built assets). Plans will auto-approve on exit_plan_mode.";
+  }
+  if (!hasUI) {
+    return "Plannotator: interactive plan review is unavailable in this session (no UI support). Plans will auto-approve on exit_plan_mode.";
+  }
+  return "Plannotator: interactive plan review assets are missing. Rebuild the extension to restore the browser UI. Plans will auto-approve on exit_plan_mode.";
+}
+
 export default function plannotator(pi: ExtensionAPI): void {
   let phase: Phase = "idle";
   let planFilePath = "PLAN.md";
   let checklistItems: ChecklistItem[] = [];
-  let preplanTools: string[] | null = null;
+  let savedState: SavedPhaseState | null = null;
+  let plannotatorConfig = {};
 
   // ── Flags ────────────────────────────────────────────────────────────
 
@@ -129,12 +152,22 @@ export default function plannotator(pi: ExtensionAPI): void {
     return resolve(cwd, planFilePath);
   }
 
+  function getPhaseProfile(): ReturnType<typeof resolvePhaseProfile> | undefined {
+    if (phase === "planning" || phase === "executing") {
+      return resolvePhaseProfile(plannotatorConfig, phase);
+    }
+    return undefined;
+  }
+
   function updateStatus(ctx: ExtensionContext): void {
+    const profile = getPhaseProfile();
     if (phase === "executing" && checklistItems.length > 0) {
       const completed = checklistItems.filter((t) => t.completed).length;
       ctx.ui.setStatus("plannotator", ctx.ui.theme.fg("accent", `📋 ${completed}/${checklistItems.length}`));
-    } else if (phase === "planning") {
-      ctx.ui.setStatus("plannotator", ctx.ui.theme.fg("warning", "⏸ plan"));
+    } else if (phase === "planning" && profile?.statusLabel) {
+      ctx.ui.setStatus("plannotator", ctx.ui.theme.fg("warning", profile.statusLabel));
+    } else if (phase === "executing" && profile?.statusLabel) {
+      ctx.ui.setStatus("plannotator", ctx.ui.theme.fg("accent", profile.statusLabel));
     } else {
       ctx.ui.setStatus("plannotator", undefined);
     }
@@ -157,51 +190,102 @@ export default function plannotator(pi: ExtensionAPI): void {
     }
   }
 
+  function captureSavedState(ctx: ExtensionContext): void {
+    savedState = {
+      activeTools: pi.getActiveTools(),
+      model: ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined,
+      thinkingLevel: pi.getThinkingLevel(),
+    };
+  }
+
   function persistState(): void {
-    pi.appendEntry("plannotator", { phase, planFilePath });
+    pi.appendEntry("plannotator", { phase, planFilePath, savedState });
   }
 
-  /** Apply tool visibility for the current phase, preserving tools from other extensions. */
-  function applyToolsForPhase(): void {
-    if (phase === "planning") {
-      const base = preplanTools ?? pi.getActiveTools();
-      const toolSet = new Set(base);
-      for (const t of PLANNING_EXTRA_TOOLS) toolSet.add(t);
-      pi.setActiveTools([...toolSet]);
-    } else if (preplanTools) {
-      // Restore pre-plan tool set (removes exit_plan_mode, etc.)
-      pi.setActiveTools(preplanTools);
-      preplanTools = null;
+  async function applyModelRef(
+    ref: { provider: string; id: string },
+    ctx: ExtensionContext,
+    reason: string,
+  ): Promise<void> {
+    const model = ctx.modelRegistry.find(ref.provider, ref.id);
+    if (!model) {
+      ctx.ui.notify(`Plannotator: ${reason} model ${ref.provider}/${ref.id} not found.`, "warning");
+      return;
     }
-    // If no preplanTools (e.g. session restore to executing/idle), leave tools as-is
+
+    const success = await pi.setModel(model);
+    if (!success) {
+      ctx.ui.notify(`Plannotator: no API key for ${ref.provider}/${ref.id}.`, "warning");
+    }
   }
 
-  function enterPlanning(ctx: ExtensionContext): void {
-    phase = "planning";
-    checklistItems = [];
-    preplanTools = pi.getActiveTools();
-    applyToolsForPhase();
+  async function restoreSavedState(ctx: ExtensionContext): Promise<void> {
+    if (!savedState) return;
+
+    pi.setActiveTools(savedState.activeTools);
+    if (savedState.model) {
+      await applyModelRef(savedState.model, ctx, "restore");
+    }
+    pi.setThinkingLevel(savedState.thinkingLevel);
+  }
+
+  async function applyPhaseConfig(ctx: ExtensionContext, opts: { restoreSavedState?: boolean } = {}): Promise<void> {
+    const profile = getPhaseProfile();
+    if (!profile) return;
+
+    if (opts.restoreSavedState !== false && savedState) {
+      await restoreSavedState(ctx);
+    }
+
+    if (profile.activeTools && profile.activeTools.length > 0) {
+      const base = savedState?.activeTools ?? pi.getActiveTools();
+      const toolSet = new Set(base);
+      for (const tool of profile.activeTools) toolSet.add(tool);
+      pi.setActiveTools([...toolSet]);
+    }
+
+    if (profile.model) {
+      await applyModelRef(profile.model, ctx, phase);
+    }
+
+    if (profile.thinking) {
+      pi.setThinkingLevel(profile.thinking);
+    }
+
     updateStatus(ctx);
     updateWidget(ctx);
-    persistState();
-    ctx.ui.notify(`Plannotator: planning mode enabled. Write your plan to ${planFilePath}.`);
   }
 
-  function exitToIdle(ctx: ExtensionContext): void {
+  async function enterPlanning(ctx: ExtensionContext): Promise<void> {
+    phase = "planning";
+    checklistItems = [];
+    captureSavedState(ctx);
+    await applyPhaseConfig(ctx, { restoreSavedState: false });
+    persistState();
+    ctx.ui.notify(`Plannotator: planning mode enabled. Write your plan to ${planFilePath}.`);
+
+    const warning = getPlanReviewAvailabilityWarning({ hasUI: ctx.hasUI, hasPlanHtml: Boolean(planHtmlContent) });
+    if (warning) {
+      ctx.ui.notify(warning, "warning");
+    }
+  }
+
+  async function exitToIdle(ctx: ExtensionContext): Promise<void> {
     phase = "idle";
     checklistItems = [];
-    applyToolsForPhase();
+    await restoreSavedState(ctx);
+    savedState = null;
     updateStatus(ctx);
     updateWidget(ctx);
     persistState();
     ctx.ui.notify("Plannotator: disabled. Full access restored.");
   }
 
-  function togglePlanMode(ctx: ExtensionContext): void {
+  async function togglePlanMode(ctx: ExtensionContext): Promise<void> {
     if (phase === "idle") {
-      enterPlanning(ctx);
+      await enterPlanning(ctx);
     } else {
-      exitToIdle(ctx);
+      await exitToIdle(ctx);
     }
   }
 
@@ -211,7 +295,7 @@ export default function plannotator(pi: ExtensionAPI): void {
     description: "Toggle plannotator (file-based plan mode)",
     handler: async (args, ctx) => {
       if (phase !== "idle") {
-        exitToIdle(ctx);
+        await exitToIdle(ctx);
         return;
       }
 
@@ -225,7 +309,7 @@ export default function plannotator(pi: ExtensionAPI): void {
       }
 
       if (targetPath) planFilePath = targetPath;
-      enterPlanning(ctx);
+      await enterPlanning(ctx);
     },
   });
 
@@ -421,7 +505,9 @@ export default function plannotator(pi: ExtensionAPI): void {
 
   pi.registerShortcut(Key.ctrlAlt("p"), {
     description: "Toggle plannotator",
-    handler: async (ctx) => togglePlanMode(ctx),
+    handler: async (ctx) => {
+      await togglePlanMode(ctx);
+    },
   });
 
   // ── exit_plan_mode Tool ──────────────────────────────────────────────
@@ -484,7 +570,8 @@ export default function plannotator(pi: ExtensionAPI): void {
       // Non-interactive or no HTML: auto-approve
       if (!ctx.hasUI || !planHtmlContent) {
         phase = "executing";
-        applyToolsForPhase();
+        await applyPhaseConfig(ctx, { restoreSavedState: true });
+        pi.appendEntry("plannotator-execute", { planFilePath });
         persistState();
         return {
           content: [
@@ -521,12 +608,9 @@ export default function plannotator(pi: ExtensionAPI): void {
 
       if (result.approved) {
         phase = "executing";
-        applyToolsForPhase();
-        updateStatus(ctx);
-        updateWidget(ctx);
-        persistState();
-
+        await applyPhaseConfig(ctx, { restoreSavedState: true });
         pi.appendEntry("plannotator-execute", { planFilePath });
+        persistState();
 
         const doneMsg = checklistItems.length > 0
           ? `After completing each step, include [DONE:n] in your response where n is the step number.`
@@ -598,8 +682,43 @@ export default function plannotator(pi: ExtensionAPI): void {
     }
   });
 
-  // Inject phase-specific context
+  // Inject phase-specific system prompt
   pi.on("before_agent_start", async (_event, ctx) => {
+    if (phase !== "planning" && phase !== "executing") return;
+
+    if (phase === "executing") {
+      // Re-read from disk each turn to stay current
+      const fullPath = resolvePlanPath(ctx.cwd);
+      try {
+        const planContent = readFileSync(fullPath, "utf-8");
+        checklistItems = parseChecklist(planContent);
+      } catch {
+        // File deleted during execution — degrade gracefully
+      }
+    }
+
+    const profile = getPhaseProfile();
+    if (!profile?.systemPrompt) return;
+
+    const todoStats = phase === "executing" ? formatTodoList(checklistItems) : formatTodoList([]);
+    const vars = buildPromptVariables({
+      planFilePath,
+      phase,
+      todoList: todoStats.todoList,
+      completedCount: todoStats.completedCount,
+      totalCount: todoStats.totalCount,
+      remainingCount: todoStats.remainingCount,
+    });
+    const rendered = renderTemplate(profile.systemPrompt, vars);
+    if (rendered.unknownVariables.length > 0) {
+      ctx.ui.notify(
+        `Plannotator: unknown template variables in ${phase} prompt: ${rendered.unknownVariables.join(", ")}`,
+        "warning",
+      );
+    }
+
+    return { systemPrompt: rendered.text };
+
     if (phase === "planning") {
       return {
         message: {
@@ -755,7 +874,8 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
       );
       phase = "idle";
       checklistItems = [];
-      applyToolsForPhase();
+      await restoreSavedState(ctx);
+      savedState = null;
       updateStatus(ctx);
       updateWidget(ctx);
       persistState();
@@ -770,6 +890,12 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
       planFilePath = flagPlanFile;
     }
 
+    const loadedConfig = loadPlannotatorConfig(ctx.cwd);
+    plannotatorConfig = loadedConfig.config;
+    for (const warning of loadedConfig.warnings) {
+      ctx.ui.notify(`Plannotator config: ${warning}`, "warning");
+    }
+
     // Check --plan flag
     if (pi.getFlag("plan") === true) {
       phase = "planning";
@@ -779,11 +905,12 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
     const entries = ctx.sessionManager.getEntries();
     const stateEntry = entries
       .filter((e: { type: string; customType?: string }) => e.type === "custom" && e.customType === "plannotator")
-      .pop() as { data?: { phase: Phase; planFilePath?: string } } | undefined;
+      .pop() as { data?: PersistedPlannotatorState } | undefined;
 
     if (stateEntry?.data) {
       phase = stateEntry.data.phase ?? phase;
       planFilePath = stateEntry.data.planFilePath ?? planFilePath;
+      savedState = stateEntry.data.savedState ?? savedState;
     }
 
     // Rebuild execution state from disk + session messages
@@ -820,12 +947,23 @@ Execute each step in order. After completing a step, include [DONE:n] in your re
       }
     }
 
-    // Apply tool restrictions for current phase
     if (phase === "planning") {
-      applyToolsForPhase();
+      checklistItems = [];
+      const warning = getPlanReviewAvailabilityWarning({ hasUI: ctx.hasUI, hasPlanHtml: Boolean(planHtmlContent) });
+      if (warning) {
+        ctx.ui.notify(warning, "warning");
+      }
+    }
+
+    if (phase === "idle") {
+      await restoreSavedState(ctx);
+      savedState = null;
+    } else if (phase === "planning" || phase === "executing") {
+      await applyPhaseConfig(ctx, { restoreSavedState: true });
     }
 
     updateStatus(ctx);
     updateWidget(ctx);
+    persistState();
   });
 }

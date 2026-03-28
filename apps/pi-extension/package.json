@@ -23,6 +23,8 @@
     "server.ts",
     "review-core.ts",
     "utils.ts",
+    "config.ts",
+    "plannotator.json",
     "README.md",
     "plannotator.html",
     "review-editor.html",
