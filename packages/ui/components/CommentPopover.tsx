@@ -48,7 +48,7 @@ export const CommentPopover: React.FC<CommentPopoverProps> = ({
   const [mode, setMode] = useState<'popover' | 'dialog'>('popover');
   const [text, setText] = useState(initialText);
   const [images, setImages] = useState<ImageAttachment[]>([]);
-  const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean } | null>(null);
+  const [position, setPosition] = useState<{ top: number; left: number; flipAbove: boolean; width: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
 

@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from 'react';
  * Track which heading section is currently visible in the viewport
  * Uses Intersection Observer to detect when headings enter/leave view
  */
-export function useActiveSection(containerRef: React.RefObject<HTMLElement>, headingCount: number) {
+export function useActiveSection(containerRef: React.RefObject<HTMLElement | null>, headingCount: number) {
   const [activeId, setActiveId] = useState<string | null>(null);
   const observerRef = useRef<IntersectionObserver | null>(null);
   

@@ -244,6 +244,9 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
     enabled: false,
     vaultPath: '',
     folder: 'plannotator',
+    filenameSeparator: 'space',
+    autoSave: false,
+    vaultBrowserEnabled: false,
   });
   const [detectedVaults, setDetectedVaults] = useState<string[]>([]);
   const [vaultsLoading, setVaultsLoading] = useState(false);
@@ -251,7 +254,7 @@ export const Settings: React.FC<SettingsProps> = ({ taterMode, onTaterModeChange
   const [octarine, setOctarine] = useState<OctarineSettings>({ enabled: false, workspace: '', folder: 'plannotator', autoSave: false });
   const [agent, setAgent] = useState<AgentSwitchSettings>({ switchTo: 'build' });
   const [planSave, setPlanSave] = useState<PlanSaveSettings>({ enabled: true, customPath: null });
-  const [uiPrefs, setUiPrefs] = useState<UIPreferences>({ tocEnabled: true, stickyActionsEnabled: true });
+  const [uiPrefs, setUiPrefs] = useState<UIPreferences>({ tocEnabled: true, stickyActionsEnabled: true, planWidth: 'compact' });
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('bypassPermissions');
   const [agentWarning, setAgentWarning] = useState<string | null>(null);
   const [autoCloseDelay, setAutoCloseDelayState] = useState<AutoCloseDelay>('off');

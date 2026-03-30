@@ -983,7 +983,7 @@ const BlockRenderer: React.FC<{
 }> = ({ block, onOpenLinkedDoc, imageBaseDir, onImageClick, onToggleCheckbox, checkboxOverrides }) => {
   switch (block.type) {
     case 'heading':
-      const Tag = `h${block.level || 1}` as keyof JSX.IntrinsicElements;
+      const Tag = `h${block.level || 1}` as React.ElementType;
       const styles = {
         1: 'text-2xl font-bold mb-4 mt-6 first:mt-0 tracking-tight',
         2: 'text-xl font-semibold mb-3 mt-8 text-foreground/90',

@@ -9,6 +9,7 @@
 import { useState, useCallback, useRef } from "react";
 import type { Annotation, ImageAttachment } from "../types";
 import type { ViewerHandle } from "../components/Viewer";
+import type { SidebarTab } from "./useSidebar";
 
 export interface UseLinkedDocOptions {
   markdown: string;
@@ -20,7 +21,7 @@ export interface UseLinkedDocOptions {
   setSelectedAnnotationId: (id: string | null) => void;
   setGlobalAttachments: (att: ImageAttachment[]) => void;
   viewerRef: React.RefObject<ViewerHandle | null>;
-  sidebar: { open: (tab: string) => void };
+  sidebar: { open: (tab?: SidebarTab) => void };
 }
 
 interface SavedPlanState {
@@ -45,7 +46,7 @@ export interface UseLinkedDocReturn {
   /** Whether a fetch is in progress */
   isLoading: boolean;
   /** Open a linked document by path (saves plan state, fetches doc, swaps) */
-  open: (docPath: string, buildUrl?: (path: string) => string, targetTab?: string) => Promise<void>;
+  open: (docPath: string, buildUrl?: (path: string) => string, targetTab?: SidebarTab) => Promise<void>;
   /** Return to the plan (caches doc annotations, restores plan state) */
   back: () => void;
   /** Dismiss the current error */
@@ -89,7 +90,7 @@ export function useLinkedDoc(options: UseLinkedDocOptions): UseLinkedDocReturn {
   );
 
   const open = useCallback(
-    async (docPath: string, buildUrl?: (path: string) => string, targetTab?: string) => {
+    async (docPath: string, buildUrl?: (path: string) => string, targetTab?: SidebarTab) => {
       setIsLoading(true);
       setError(null);
 

@@ -4,8 +4,12 @@
   "type": "module",
   "exports": {
     "./components/*": "./components/*.tsx",
+    "./components/ImageAnnotator": "./components/ImageAnnotator/index.tsx",
+    "./components/sidebar/*": "./components/sidebar/*.tsx",
+    "./components/plan-diff/*": "./components/plan-diff/*.tsx",
     "./utils/*": "./utils/*.ts",
     "./hooks/*": "./hooks/*.ts",
+    "./config": "./config/index.ts",
     "./types": "./types.ts",
     "./theme": "./theme.css"
   },
