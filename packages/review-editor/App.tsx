@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { type Origin, getAgentName } from '@plannotator/shared/agents';
 import { ThemeProvider, useTheme } from '@plannotator/ui/components/ThemeProvider';
 import { ModeToggle } from '@plannotator/ui/components/ModeToggle';
@@ -26,6 +26,7 @@ import { useAIChat } from './hooks/useAIChat';
 import { extractLinesFromPatch } from './utils/patchParser';
 import { isTypingTarget, useReviewSearch } from './hooks/useReviewSearch';
 import { useEditorAnnotations } from '@plannotator/ui/hooks/useEditorAnnotations';
+import { useExternalAnnotations } from '@plannotator/ui/hooks/useExternalAnnotations';
 import { exportEditorAnnotations } from '@plannotator/ui/utils/parser';
 import { ResizeHandle } from '@plannotator/ui/components/ResizeHandle';
 import { DiffViewer } from './components/DiffViewer';
@@ -184,9 +185,44 @@ const ReviewApp: React.FC = () => {
     clearPendingSelection,
   });
 
+  // VS Code editor annotations (only polls when inside VS Code webview)
+  const { editorAnnotations, deleteEditorAnnotation } = useEditorAnnotations();
+
+  // External annotations (SSE-based, for any external tool)
+  // TODO: Replace !!origin with a dedicated isApiMode boolean (set on /api/diff success/failure).
+  // origin is an identity field, not a connectivity signal — the standalone dev server
+  // (apps/review/) doesn't set it, so external annotations are silently disabled there.
+  // The same !!origin proxy is used elsewhere in this file (draft hook, feedback guard, conditional UI)
+  // so this should be addressed as a broader refactor.
+  const { externalAnnotations, updateExternalAnnotation, deleteExternalAnnotation } = useExternalAnnotations<CodeAnnotation>({ enabled: !!origin });
+
+  // Merge local + SSE annotations, deduping draft-restored externals against
+  // live SSE versions. Prefer the SSE version when both exist (same source,
+  // type, and originalText). This avoids the timing issues of an effect-based
+  // cleanup — draft-restored externals persist until SSE actually re-delivers them.
+  const allAnnotations = useMemo(() => {
+    if (externalAnnotations.length === 0) return annotations;
+
+    const local = annotations.filter(a => {
+      if (!a.source) return true;
+      return !externalAnnotations.some(ext =>
+        ext.source === a.source &&
+        ext.type === a.type &&
+        ext.filePath === a.filePath &&
+        ext.lineStart === a.lineStart &&
+        ext.lineEnd === a.lineEnd &&
+        ext.side === a.side
+      );
+    });
+
+    return [...local, ...externalAnnotations];
+  }, [annotations, externalAnnotations]);
+  const allAnnotationsRef = useRef(allAnnotations);
+  allAnnotationsRef.current = allAnnotations;
+
   // Auto-save code annotation drafts
   const { draftBanner, restoreDraft, dismissDraft } = useCodeAnnotationDraft({
-    annotations,
+    annotations: allAnnotations,
     viewedFiles,
     isApiMode: !!origin,
     submitted: !!submitted,
@@ -197,9 +233,6 @@ const ReviewApp: React.FC = () => {
     if (restored.annotations.length > 0) setAnnotations(restored.annotations);
     if (restored.viewedFiles.length > 0) setViewedFiles(new Set(restored.viewedFiles));
   }, [restoreDraft]);
-
-  // VS Code editor annotations (only polls when inside VS Code webview)
-  const { editorAnnotations, deleteEditorAnnotation } = useEditorAnnotations();
 
   // AI Chat
   const [aiAvailable, setAiAvailable] = useState(false);
@@ -385,8 +418,8 @@ const ReviewApp: React.FC = () => {
   const activeFileAnnotations = useMemo(() => {
     const activeFile = files[activeFileIndex];
     if (!activeFile) return [];
-    return annotations.filter(a => a.filePath === activeFile.path);
-  }, [annotations, files, activeFileIndex]);
+    return allAnnotations.filter(a => a.filePath === activeFile.path);
+  }, [allAnnotations, files, activeFileIndex]);
 
   // Load diff content - try API first, fall back to demo
   useEffect(() => {
@@ -521,23 +554,33 @@ const ReviewApp: React.FC = () => {
     suggestedCode?: string,
     originalCode?: string
   ) => {
-    setAnnotations(prev => prev.map(ann =>
-      ann.id === id ? {
-        ...ann,
-        ...(text !== undefined && { text }),
-        ...(suggestedCode !== undefined && { suggestedCode }),
-        ...(originalCode !== undefined && { originalCode }),
-      } : ann
+    const ann = allAnnotationsRef.current.find(a => a.id === id);
+    const updates = {
+      ...(text !== undefined && { text }),
+      ...(suggestedCode !== undefined && { suggestedCode }),
+      ...(originalCode !== undefined && { originalCode }),
+    };
+    if (ann?.source && externalAnnotations.some(e => e.id === id)) {
+      updateExternalAnnotation(id, updates);
+      return;
+    }
+    setAnnotations(prev => prev.map(a =>
+      a.id === id ? { ...a, ...updates } : a
     ));
-  }, []);
+  }, [updateExternalAnnotation, externalAnnotations]);
 
-  // Delete annotation
   const handleDeleteAnnotation = useCallback((id: string) => {
+    const ann = allAnnotationsRef.current.find(a => a.id === id);
+    if (ann?.source && externalAnnotations.some(e => e.id === id)) {
+      deleteExternalAnnotation(id);
+      if (selectedAnnotationId === id) setSelectedAnnotationId(null);
+      return;
+    }
     setAnnotations(prev => prev.filter(a => a.id !== id));
     if (selectedAnnotationId === id) {
       setSelectedAnnotationId(null);
     }
-  }, [selectedAnnotationId]);
+  }, [selectedAnnotationId, deleteExternalAnnotation, externalAnnotations]);
 
   // Handle identity change - update author on existing annotations
   const handleIdentityChange = useCallback((oldIdentity: string, newIdentity: string) => {
@@ -663,7 +706,7 @@ const ReviewApp: React.FC = () => {
     }
 
     // Find the annotation
-    const annotation = annotations.find(a => a.id === id);
+    const annotation = allAnnotations.find(a => a.id === id);
     if (!annotation) {
       setSelectedAnnotationId(id);
       return;
@@ -676,7 +719,7 @@ const ReviewApp: React.FC = () => {
     }
 
     setSelectedAnnotationId(id);
-  }, [annotations, files, activeFileIndex, handleFileSwitch]);
+  }, [allAnnotations, files, activeFileIndex, handleFileSwitch]);
 
   // Copy raw diff to clipboard
   const handleCopyDiff = useCallback(async () => {
@@ -694,12 +737,12 @@ const ReviewApp: React.FC = () => {
 
   // Copy feedback markdown to clipboard
   const handleCopyFeedback = useCallback(async () => {
-    if (annotations.length === 0) {
+    if (allAnnotations.length === 0) {
       setShowNoAnnotationsDialog(true);
       return;
     }
     try {
-      const feedback = exportReviewFeedback(annotations, prMetadata);
+      const feedback = exportReviewFeedback(allAnnotations, prMetadata);
       await navigator.clipboard.writeText(feedback);
       setCopyFeedback('Feedback copied!');
       setTimeout(() => setCopyFeedback(null), 2000);
@@ -708,18 +751,18 @@ const ReviewApp: React.FC = () => {
       setCopyFeedback('Failed to copy');
       setTimeout(() => setCopyFeedback(null), 2000);
     }
-  }, [annotations, prMetadata]);
+  }, [allAnnotations, prMetadata]);
 
   const activeFile = files[activeFileIndex];
   const feedbackMarkdown = useMemo(() => {
-    let output = exportReviewFeedback(annotations, prMetadata);
+    let output = exportReviewFeedback(allAnnotations, prMetadata);
     if (editorAnnotations.length > 0) {
       output += exportEditorAnnotations(editorAnnotations);
     }
     return output;
-  }, [annotations, prMetadata, editorAnnotations]);
+  }, [allAnnotations, prMetadata, editorAnnotations]);
 
-  const totalAnnotationCount = annotations.length + editorAnnotations.length;
+  const totalAnnotationCount = allAnnotations.length + editorAnnotations.length;
 
   // Send feedback to OpenCode via API
   const handleSendFeedback = useCallback(async () => {
@@ -738,7 +781,7 @@ const ReviewApp: React.FC = () => {
         body: JSON.stringify({
           approved: false,
           feedback: feedbackMarkdown,
-          annotations,
+          annotations: allAnnotations,
           ...(effectiveAgent && { agentSwitch: effectiveAgent }),
         }),
       });
@@ -753,7 +796,7 @@ const ReviewApp: React.FC = () => {
       setTimeout(() => setCopyFeedback(null), 2000);
       setIsSendingFeedback(false);
     }
-  }, [totalAnnotationCount, feedbackMarkdown, annotations]);
+  }, [totalAnnotationCount, feedbackMarkdown, allAnnotations]);
 
   // Approve without feedback (LGTM)
   const handleApprove = useCallback(async () => {
@@ -783,8 +826,8 @@ const ReviewApp: React.FC = () => {
 
   // Build the payload for /api/pr-action from current annotations
   const buildPRReviewPayload = useCallback((action: 'approve' | 'comment', generalComment?: string) => {
-    const fileAnnotations = annotations.filter(a => (a.scope ?? 'line') === 'line');
-    const fileScoped = annotations.filter(a => a.scope === 'file');
+    const fileAnnotations = allAnnotations.filter(a => (a.scope ?? 'line') === 'line');
+    const fileScoped = allAnnotations.filter(a => a.scope === 'file');
 
     // Top-level body: file-scoped comments
     const bodyParts: string[] = [];
@@ -838,7 +881,7 @@ const ReviewApp: React.FC = () => {
     }
 
     return { action, body, fileComments };
-  }, [annotations, editorAnnotations, files]);
+  }, [allAnnotations, editorAnnotations, files]);
 
   // Submit a review directly to GitHub
   const handlePlatformAction = useCallback(async (action: 'approve' | 'comment', generalComment?: string) => {
@@ -1361,7 +1404,7 @@ const ReviewApp: React.FC = () => {
                 files={files}
                 activeFileIndex={activeFileIndex}
                 onSelectFile={handleFileSwitch}
-                annotations={annotations}
+                annotations={allAnnotations}
                 viewedFiles={viewedFiles}
                 onToggleViewed={handleToggleViewed}
                 hideViewedFiles={hideViewedFiles}
@@ -1498,7 +1541,7 @@ const ReviewApp: React.FC = () => {
           <ReviewPanel
             isOpen={isPanelOpen}
             onToggle={() => setIsPanelOpen(!isPanelOpen)}
-            annotations={annotations}
+            annotations={allAnnotations}
             files={files}
             selectedAnnotationId={selectedAnnotationId}
             onSelectAnnotation={handleSelectAnnotation}
@@ -1544,7 +1587,7 @@ const ReviewApp: React.FC = () => {
               </div>
               <div className="flex-1 overflow-auto p-4">
                 <div className="text-xs text-muted-foreground mb-2">
-                  {annotations.length} annotation{annotations.length !== 1 ? 's' : ''}
+                  {allAnnotations.length} annotation{allAnnotations.length !== 1 ? 's' : ''}
                 </div>
                 <pre className="export-code-block whitespace-pre-wrap">
                   {feedbackMarkdown}

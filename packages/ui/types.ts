@@ -1,7 +1,5 @@
 export enum AnnotationType {
   DELETION = 'DELETION',
-  INSERTION = 'INSERTION',
-  REPLACEMENT = 'REPLACEMENT',
   COMMENT = 'COMMENT',
   GLOBAL_COMMENT = 'GLOBAL_COMMENT',
 }
@@ -25,6 +23,7 @@ export interface Annotation {
   originalText: string; // The text that was selected
   createdA: number;
   author?: string; // Tater identity for collaborative sharing
+  source?: string; // External tool identifier (e.g., "eslint") — set when annotation comes from external API
   images?: ImageAttachment[]; // Attached images with human-readable names
   isQuickLabel?: boolean; // true if created via quick label chip
   quickLabelTip?: string; // optional instruction tip from the label definition
@@ -76,6 +75,7 @@ export interface CodeAnnotation {
   originalCode?: string; // Original selected lines for suggestion diff
   createdAt: number;
   author?: string;
+  source?: string; // External tool identifier (e.g., "eslint") — set when annotation comes from external API
 }
 
 // For @pierre/diffs integration
@@ -134,3 +134,7 @@ export interface VaultNode {
 }
 
 export type { EditorAnnotation } from '@plannotator/shared/types';
+
+export type {
+  ExternalAnnotationEvent,
+} from '@plannotator/shared/external-annotation';
