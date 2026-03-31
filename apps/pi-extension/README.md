@@ -88,7 +88,7 @@ Later layers overwrite earlier ones. If a field is omitted, it inherits the valu
     "planning": {
       "model": null,
       "thinking": null,
-      "activeTools": ["grep", "find", "ls", "exit_plan_mode"],
+      "activeTools": ["grep", "find", "ls", "plannotator_submit_plan"],
       "statusLabel": "⏸ plan",
       "systemPrompt": "[PLANNING]\nPlan file: ${planFilePath}"
     },
