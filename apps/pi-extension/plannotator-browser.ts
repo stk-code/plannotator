@@ -157,8 +157,8 @@ export async function openCodeReview(
 		throw new Error("Plannotator code review browser is unavailable in this session.");
 	}
 
-	const gitCtx = await getGitContext();
 	const cwd = options.cwd ?? ctx.cwd;
+	const gitCtx = await getGitContext(cwd);
 	const defaultBranch = options.defaultBranch ?? gitCtx.defaultBranch;
 	const diffType: DiffType = options.diffType ?? "uncommitted";
 	const { patch: rawPatch, label: gitRef, error } = await runGitDiff(diffType, defaultBranch, cwd);
